@@ -17,11 +17,4 @@ public class FramesController {
     @Autowired
     private FrameService frameService;
 
-    @PostMapping
-    public File framesampleFile(
-            @RequestBody File framesfile
-
-    ) {
-        return frameService.samplingFrames(framesfile);
-    }
 }
