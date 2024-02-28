@@ -13,21 +13,23 @@ import java.io.IOException;
 
 @Service
 public class CNNExtractor {
-    public static INDArray cnnFeaturesExtractor(String imagePath) throws IOException {
-        // Carrega o modelo VGG16 pré-treinado
-        ZooModel zooModel = VGG16.builder().build();
-        ComputationGraph vgg16 = (ComputationGraph) zooModel.initPretrained(PretrainedType.IMAGENET);
+    private final ComputationGraph vgg16;
 
+    public CNNExtractor() throws IOException {
+        // Carrega o modelo VGG16 pré-treinado uma única vez
+        ZooModel zooModel = VGG16.builder().build();
+        vgg16 = (ComputationGraph) zooModel.initPretrained(PretrainedType.IMAGENET);
+    }
+    public INDArray cnnFeaturesExtractor(String imagePath) throws IOException {
         // Carrega e faz o pre-processamento da imagem para extração das caracteristicas pela CNN
         INDArray frame = loadImageAndPreProcess(imagePath);
         // Extrai características das imagens usando a camada 'fc2' do VGG16
         INDArray features = vgg16.feedForward(frame, false).get("fc2");
-
         return features;
     }
 
     // Função para carregar e pré-processar uma imagem
-    public static INDArray loadImageAndPreProcess(String imagePath) throws IOException {
+    public INDArray loadImageAndPreProcess(String imagePath) throws IOException {
         /*
         Redimensionamento da Imagem: A imagem é redimensionada para o tamanho esperado pela rede VGG16, que é 224x224 pixels. Isso é feito pela classe NativeImageLoader ao carregar a imagem.
         Subtração da Média: A média de cada canal de cor (RGB) é subtraída de cada pixel. Esse valor médio é específico para o conjunto de dados ImageNet, no qual o modelo VGG16 foi pré-treinado. Essa etapa é importante para centralizar os dados em torno de zero, o que ajuda na convergência do treinamento da rede.
@@ -41,7 +43,7 @@ public class CNNExtractor {
     }
 
     // Função para comparar características extraídas de duas imagens
-    public static double compareFeatures(INDArray features1, INDArray features2) {
+    public double compareFeatures(INDArray features1, INDArray features2) {
         // Calcula a distância euclidiana entre os dois vetores de características
         // Calcula a diferença elemento a elemento entre os dois vetores de características
         INDArray diff = features1.sub(features2);
@@ -50,8 +52,6 @@ public class CNNExtractor {
         // Soma todos os elementos do vetor de quadrados para obter o quadrado da distância euclidiana
         double squaredDistance = squaredDiff.sumNumber().doubleValue();
         // Calcula a raiz quadrada para obter a distância euclidiana
-        double distance = Math.sqrt(squaredDistance);
-
-        return distance;
+        return Math.sqrt(squaredDistance);
     }
 }

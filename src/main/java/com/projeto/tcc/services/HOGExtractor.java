@@ -1,24 +1,33 @@
 package com.projeto.tcc.services;
 
-import org.opencv.core.Core;
-import org.opencv.core.Mat;
+
+
+
+import org.bytedeco.javacpp.FloatPointer;
 import org.opencv.core.MatOfFloat;
-import org.opencv.imgcodecs.Imgcodecs;
-import org.opencv.objdetect.HOGDescriptor;
+import org.bytedeco.opencv.global.opencv_objdetect;
+import org.bytedeco.opencv.opencv_core.Mat;
+import org.bytedeco.opencv.opencv_objdetect.HOGDescriptor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 @Service
 public class HOGExtractor {
-    static { System.loadLibrary(Core.NATIVE_LIBRARY_NAME); }
+    @Value("${opencv.native.library.path}")
+    private String opencvNativeLibraryPath;
+
     public float[] hogExtract(Mat frame) {
         //Já recebe a imagem carregada (Imgcodecs.imread)
         //Criação do objeto HOGDescriptor
         HOGDescriptor hog = new HOGDescriptor();
-        //extracao das caracteristicas do frame
-        MatOfFloat descriptor = new MatOfFloat();
+        FloatPointer descriptor = new FloatPointer();
         hog.compute(frame, descriptor);
         // Converte o descritor para vetor para facilitar a comparação e retorna
-        return descriptor.toArray();
+        int descriptorSize = (int) (hog.getDescriptorSize());
+        float[] descriptorArray = new float[descriptorSize];
+        descriptor.get(descriptorArray);
+        //extracao das caracteristicas do frame
+        return descriptorArray;
     }
 
     public double distanciaEuclidiana(float[] vector1, float[] vector2) {
