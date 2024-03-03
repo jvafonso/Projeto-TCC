@@ -29,9 +29,6 @@ import java.util.Scanner;
 @Slf4j
 public class FrameService {
 
-    @Value("${opencv.native.library.path}")
-    private String opencvNativeLibraryPath;
-
     @Autowired
     private HOGExtractor hogExtractor;
 

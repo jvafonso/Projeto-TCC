@@ -1,4 +1,5 @@
 package com.projeto.tcc.services;
+import lombok.extern.slf4j.Slf4j;
 import org.datavec.image.loader.NativeImageLoader;
 import org.deeplearning4j.nn.graph.ComputationGraph;
 import org.deeplearning4j.zoo.ZooModel;
@@ -12,6 +13,7 @@ import java.io.File;
 import java.io.IOException;
 
 @Service
+@Slf4j
 public class CNNExtractor {
     private final ComputationGraph vgg16;
 
@@ -21,6 +23,7 @@ public class CNNExtractor {
         vgg16 = (ComputationGraph) zooModel.initPretrained(PretrainedType.IMAGENET);
     }
     public INDArray cnnFeaturesExtractor(String imagePath) throws IOException {
+        log.info("Extração CNN");
         // Carrega e faz o pre-processamento da imagem para extração das caracteristicas pela CNN
         INDArray frame = loadImageAndPreProcess(imagePath);
         // Extrai características das imagens usando a camada 'fc2' do VGG16
@@ -44,6 +47,7 @@ public class CNNExtractor {
 
     // Função para comparar características extraídas de duas imagens
     public double compareFeatures(INDArray features1, INDArray features2) {
+        log.info("Comparação CNN");
         // Calcula a distância euclidiana entre os dois vetores de características
         // Calcula a diferença elemento a elemento entre os dois vetores de características
         INDArray diff = features1.sub(features2);

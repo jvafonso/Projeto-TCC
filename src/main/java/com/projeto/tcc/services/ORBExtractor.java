@@ -25,6 +25,7 @@ public class ORBExtractor {
     public Mat orbFeaturesExtractor(Mat image) {
         // Recebe a imagem já carregada (Imgcodecs.imread)
         // Extrai características ORB das imagem
+        log.info("Extração ORB");
         ORB orb = ORB.create();
         KeyPointVector keypoints = new KeyPointVector();
         // Criação do Mat que sera retornado e pode ser comparado posteriormente
@@ -60,7 +61,8 @@ public class ORBExtractor {
             if (dist > maxDist) maxDist = dist;
         }
         // Limar utilizado para verificar a similaridade entre as imagens
-        double threshold = 3 * minDist;
+        log.info("Filtragem ORB");
+        double threshold = 1.5 * minDist;
         List<DMatch> goodMatchesList  = new ArrayList<>();
         for (int i = 0; i < matches.size(); i++) {
             if (matches.get(i).distance() < threshold) {
