@@ -7,10 +7,11 @@ import org.deeplearning4j.zoo.model.VGG16;
 import org.deeplearning4j.zoo.PretrainedType;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.dataset.api.preprocessor.VGG16ImagePreProcessor;
+import org.nd4j.linalg.factory.Nd4j;
 import org.springframework.stereotype.Service;
 
-import java.io.File;
-import java.io.IOException;
+import java.io.*;
+import java.util.*;
 
 @Service
 @Slf4j
@@ -58,4 +59,95 @@ public class CNNExtractor {
         // Calcula a raiz quadrada para obter a distância euclidiana
         return Math.sqrt(squaredDistance);
     }
+
+    public static INDArray stringToINDArray(String str) {
+        // Convertendo a string de volta para um INDArray
+        List<double[]> rows = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(new StringReader(str))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] values = line.split(",");
+                double[] row = new double[values.length];
+                for (int i = 0; i < values.length; i++) {
+                    row[i] = Double.parseDouble(values[i]);
+                }
+                rows.add(row);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        double[][] data = rows.toArray(new double[0][]);
+        return Nd4j.create(data);
+    }
+
+    public static INDArray calculateAverageIndArray(List<INDArray> arrays) {
+        if (arrays == null || arrays.isEmpty()) {
+            throw new IllegalArgumentException("A lista não pode ser vazia.");
+        }
+        // Inicializa um INDArray para armazenar a soma
+        INDArray sum = Nd4j.zeros(arrays.get(0).shape());
+        // Soma todos os elementos da lista
+        for (INDArray array : arrays) {
+            sum.addi(array);
+        }
+        // Calcula a média
+        return sum.divi(arrays.size());
+    }
+
+    public List<INDArray> groupFramesCNN(File descriptorFile, double similarityThreshold) throws IOException {
+        List<List<INDArray>> groups = new ArrayList<>();
+        List<INDArray> selectedDescriptors = new ArrayList<>();
+
+        try (BufferedReader reader = new BufferedReader(new FileReader(descriptorFile))) {
+            String line;
+            StringBuilder descriptorString = new StringBuilder();
+            while ((line = reader.readLine()) != null) {
+                if (line.trim().isEmpty()) {
+                    if (descriptorString.length() > 0) {
+                        INDArray descriptor = stringToINDArray(descriptorString.toString());
+                        boolean addedToGroup = false;
+                        for (List<INDArray> group : groups) {
+                            INDArray groupDescriptor = calculateAverageIndArray(group);
+                            double similarity = compareFeatures(groupDescriptor, descriptor);
+                            if (similarity > similarityThreshold) {
+                                group.add(descriptor);
+                                addedToGroup = true;
+                                break;
+                            }
+                        }
+                        if (!addedToGroup) {
+                            List<INDArray> newGroup = new ArrayList<>();
+                            newGroup.add(descriptor);
+                            groups.add(newGroup);
+                        }
+                        descriptorString.setLength(0); // Clear the StringBuilder for the next descriptor
+                    }
+                } else {
+                    descriptorString.append(line).append("\n");
+                }
+            }
+        }
+
+        for (List<INDArray> group : groups) {
+            INDArray groupDescriptor = calculateAverageIndArray(group);
+            INDArray selectedDescriptor = null;
+            double maxSimilarity = -1;
+            for (INDArray descriptor : group) {
+                double similarity = compareFeatures(groupDescriptor, descriptor);
+                if (similarity > maxSimilarity) {
+                    maxSimilarity = similarity;
+                    selectedDescriptor = descriptor;
+                }
+            }
+            if (selectedDescriptor != null) {
+                selectedDescriptors.add(selectedDescriptor);
+            }
+        }
+        return selectedDescriptors;
+    }
+
+
+
+
+
 }

@@ -10,7 +10,7 @@
 	</parent>
 	<groupId>com.projeto</groupId>
 	<artifactId>tcc</artifactId>
-	<version>0.0.1-SNAPSHOT</version>
+	<version>2.0.1</version>
 	<name>Projeto de amostragem de frames TCC</name>
 	<description>Algoritmo do trabalho de conclusão de curso para amostragem de frames de um vídeo para seleção de frames relevantes para posterior análise</description>
 	<properties>

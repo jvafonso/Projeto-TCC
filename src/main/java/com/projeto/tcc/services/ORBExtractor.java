@@ -2,21 +2,25 @@ package com.projeto.tcc.services;
 
 
 
-import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.bytedeco.opencv.global.opencv_core;
-import org.bytedeco.opencv.opencv_core.KeyPointVector;
+import org.bytedeco.opencv.opencv_core.*;
 import org.bytedeco.opencv.opencv_core.Mat;
 import org.bytedeco.opencv.opencv_core.DMatchVector;
 import org.bytedeco.opencv.opencv_features2d.ORB;
-import org.bytedeco.opencv.global.opencv_features2d;
 import org.bytedeco.opencv.opencv_features2d.DescriptorMatcher;
 import org.bytedeco.opencv.opencv_core.DMatch;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import static org.bytedeco.opencv.global.opencv_imgproc.resize;
+import static org.bytedeco.opencv.global.opencv_core.*;
+import org.bytedeco.javacpp.indexer.FloatIndexer;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.*;
 
 @Service
 @Slf4j
@@ -76,4 +80,162 @@ public class ORBExtractor {
         }
         return goodMatches;
     }
+
+    public KeyPointVector orbDetect(Mat frame) {
+        // Cria o detector ORB
+        ORB orb = ORB.create();
+        // Cria um objeto para armazenar os pontos-chave detectados
+        KeyPointVector keypoints = new KeyPointVector();
+        // Detecta os pontos-chave
+        orb.detect(frame, keypoints);
+
+        return keypoints;
+    }
+
+    public static Mat stringToMat(String str) {
+        String[] parts = str.split("\n", 2);
+        String[] header = parts[0].split(": ");
+        int rows = Integer.parseInt(header[0].trim());
+        int cols = Integer.parseInt(header[1].trim());
+        int type = Integer.parseInt(header[2].trim());
+        Mat mat = new Mat(rows, cols, type);
+        ByteBuffer buffer = mat.createBuffer();
+        String[] byteStrings = parts[1].trim().split(" ");
+        for (String byteString : byteStrings) {
+            if (!byteString.isEmpty()) {
+                byte b = (byte) Integer.parseInt(byteString, 16);
+                buffer.put(b);
+            }
+        }
+        return mat;
+    }
+
+    public static Mat calculateAverageMat(List<Mat> mats) {
+        if (mats == null || mats.isEmpty()) {
+            throw new IllegalArgumentException("A lista não pode ser vazia.");
+        }
+
+        // Determinar o tamanho e tipo mais comuns
+        Map<Size, Integer> sizeCountMap = new HashMap<>();
+        Map<Integer, Integer> typeCountMap = new HashMap<>();
+        for (Mat mat : mats) {
+            Size size = mat.size();
+            sizeCountMap.merge(size, 1, Integer::sum);
+            typeCountMap.merge(mat.type(), 1, Integer::sum);
+        }
+        Size commonSize = Collections.max(sizeCountMap.entrySet(), Map.Entry.comparingByValue()).getKey();
+        int commonType = Collections.max(typeCountMap.entrySet(), Map.Entry.comparingByValue()).getKey();
+
+        // Ajustar Mats incompatíveis
+        List<Mat> adjustedMats = new ArrayList<>();
+        for (Mat mat : mats) {
+            if (!mat.size().equals(commonSize) || mat.type() != commonType) {
+                Mat adjustedMat = new Mat();
+                resize(mat, adjustedMat, new Size((int) commonSize.width(), (int) commonSize.height()));
+                adjustedMats.add(adjustedMat);
+            } else {
+                adjustedMats.add(mat.clone());
+            }
+        }
+
+        // Calcular a média
+        Mat sum = new Mat(commonSize, CV_32F);
+        for (Mat mat : adjustedMats) {
+            Mat floatMat = new Mat();
+            mat.convertTo(floatMat, CV_32F); // Convertendo para float
+            add(sum, floatMat, sum);
+        }
+
+        // Dividir cada elemento do sum pelo número de Mats
+        FloatIndexer sumIndexer = sum.createIndexer();
+        for (int y = 0; y < sum.rows(); y++) {
+            for (int x = 0; x < sum.cols(); x++) {
+                sumIndexer.put(y, x, sumIndexer.get(y, x) / adjustedMats.size());
+            }
+        }
+        sumIndexer.release();
+
+        Mat average = new Mat();
+        sum.convertTo(average, commonType); // Convertendo de volta para o tipo comum
+
+        return average;
+    }
+
+
+    public List<Mat> groupFramesORB(File descriptorFile, double similarityThreshold) throws IOException {
+        List<List<Mat>> groups = new ArrayList<>();
+        List<Mat> selectedDescriptors = new ArrayList<>();
+
+        try (BufferedReader reader = new BufferedReader(new FileReader(descriptorFile))) {
+            List<String> descriptorLines = new ArrayList<>();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isEmpty()) {
+                    if (!descriptorLines.isEmpty()) {
+                        Mat descriptor = stringToMat(String.join("\n", descriptorLines));
+                        descriptorLines.clear();
+                        boolean addedToGroup = false;
+                        for (List<Mat> group : groups) {
+                            Mat groupDescriptor = calculateAverageMat(group);
+                            DMatchVector matches = compareFeatures(groupDescriptor, descriptor);
+                            if (matches.size() < similarityThreshold) {
+                                group.add(descriptor);
+                                addedToGroup = true;
+                                break;
+                            }
+                        }
+                        if (!addedToGroup) {
+                            List<Mat> newGroup = new ArrayList<>();
+                            newGroup.add(descriptor);
+                            groups.add(newGroup);
+                        }
+                    }
+                } else {
+                    descriptorLines.add(line);
+                }
+            }
+            // Process the last descriptor
+            if (!descriptorLines.isEmpty()) {
+                Mat descriptor = stringToMat(String.join("\n", descriptorLines));
+                boolean addedToGroup = false;
+                for (List<Mat> group : groups) {
+                    Mat groupDescriptor = calculateAverageMat(group);
+                    DMatchVector matches = compareFeatures(groupDescriptor, descriptor);
+                    if (matches.size() < similarityThreshold) {
+                        group.add(descriptor);
+                        addedToGroup = true;
+                        break;
+                    }
+                }
+                if (!addedToGroup) {
+                    List<Mat> newGroup = new ArrayList<>();
+                    newGroup.add(descriptor);
+                    groups.add(newGroup);
+                }
+            }
+        }
+
+        // Create samples from groups
+        for (List<Mat> group : groups) {
+            Mat groupDescriptor = calculateAverageMat(group);
+            Mat selectedDescriptor = null;
+            double maxMatches = -1;
+            for (Mat descriptor : group) {
+                DMatchVector matches = compareFeatures(groupDescriptor, descriptor);
+                if (matches.size() > maxMatches) {
+                    maxMatches = matches.size();
+                    selectedDescriptor = descriptor;
+                }
+            }
+            if (selectedDescriptor != null) {
+                selectedDescriptors.add(selectedDescriptor);
+            }
+        }
+
+        return selectedDescriptors;
+    }
+
+
+
+
 }
