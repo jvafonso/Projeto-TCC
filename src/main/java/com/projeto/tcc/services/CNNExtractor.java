@@ -1,5 +1,6 @@
 package com.projeto.tcc.services;
 import lombok.extern.slf4j.Slf4j;
+import org.bytedeco.opencv.opencv_core.Mat;
 import org.datavec.image.loader.NativeImageLoader;
 import org.deeplearning4j.nn.graph.ComputationGraph;
 import org.deeplearning4j.zoo.ZooModel;
@@ -22,15 +23,29 @@ public class CNNExtractor {
         // Carrega o modelo VGG16 pré-treinado uma única vez
         ZooModel zooModel = VGG16.builder().build();
         vgg16 = (ComputationGraph) zooModel.initPretrained(PretrainedType.IMAGENET);
+        vgg16.initGradientsView();
     }
-    public INDArray cnnFeaturesExtractor(String imagePath) throws IOException {
-        log.info("Extração CNN");
-        // Carrega e faz o pre-processamento da imagem para extração das caracteristicas pela CNN
-        INDArray frame = loadImageAndPreProcess(imagePath);
-        // Extrai características das imagens usando a camada 'fc2' do VGG16
-        INDArray features = vgg16.feedForward(frame, false).get("fc2");
-        return features;
+
+    public List<INDArray> cnnFeaturesExtractorBatch(List<String> imagePaths) throws IOException {
+        log.info("Extração CNN em lote");
+        List<INDArray> featuresList = new ArrayList<>();
+
+        for (String imagePath : imagePaths) {
+            INDArray frame = loadImageAndPreProcess(imagePath);
+
+            // Processa a imagem individualmente
+            INDArray singleFeature = vgg16.feedForward(frame, false).get("fc2");
+
+            // Evita vazamentos de memória e problemas de espaço de trabalho INDArrays
+            Nd4j.getWorkspaceManager().destroyAllWorkspacesForCurrentThread();
+
+            featuresList.add(singleFeature);
+        }
+
+        return featuresList;
     }
+
+
 
     // Função para carregar e pré-processar uma imagem
     public INDArray loadImageAndPreProcess(String imagePath) throws IOException {
@@ -46,18 +61,20 @@ public class CNNExtractor {
         return image;
     }
 
-    // Função para comparar características extraídas de duas imagens
-    public double compareFeatures(INDArray features1, INDArray features2) {
-        log.info("Comparação CNN");
-        // Calcula a distância euclidiana entre os dois vetores de características
-        // Calcula a diferença elemento a elemento entre os dois vetores de características
-        INDArray diff = features1.sub(features2);
-        // Calcula o quadrado de cada elemento do vetor de diferença
-        INDArray squaredDiff = diff.mul(diff);
-        // Soma todos os elementos do vetor de quadrados para obter o quadrado da distância euclidiana
-        double squaredDistance = squaredDiff.sumNumber().doubleValue();
-        // Calcula a raiz quadrada para obter a distância euclidiana
-        return Math.sqrt(squaredDistance);
+    public static double compareFeatures(INDArray features1, INDArray features2) {
+        // Normalizar os vetores de características
+        INDArray normFeatures1 = features1.div(features1.norm2Number());
+        INDArray normFeatures2 = features2.div(features2.norm2Number());
+        int alpha = 5;
+
+        // Calcular a distância euclidiana entre os vetores normalizados
+        INDArray diff = normFeatures1.sub(normFeatures2);
+        double distanciaEuclidiana = diff.norm2Number().doubleValue();
+
+        // Normalização para o intervalo [0.1, 1] usando uma função sigmoide ajustada
+        double similaridade = 0.9 / (1 + Math.exp(alpha * distanciaEuclidiana)) + 0.1;
+
+        return similaridade;
     }
 
     public static INDArray stringToINDArray(String str) {
@@ -94,8 +111,8 @@ public class CNNExtractor {
         return sum.divi(arrays.size());
     }
 
-    public List<INDArray> groupFramesCNN(File descriptorFile, double similarityThreshold) throws IOException {
-        List<List<INDArray>> groups = new ArrayList<>();
+    public List<INDArray> groupFramesCNN(File descriptorFile, double similarityThreshold, double samplingPercentage) throws IOException {
+        List<CNNGroup> groups = new ArrayList<>();
         List<INDArray> selectedDescriptors = new ArrayList<>();
 
         try (BufferedReader reader = new BufferedReader(new FileReader(descriptorFile))) {
@@ -105,21 +122,7 @@ public class CNNExtractor {
                 if (line.trim().isEmpty()) {
                     if (descriptorString.length() > 0) {
                         INDArray descriptor = stringToINDArray(descriptorString.toString());
-                        boolean addedToGroup = false;
-                        for (List<INDArray> group : groups) {
-                            INDArray groupDescriptor = calculateAverageIndArray(group);
-                            double similarity = compareFeatures(groupDescriptor, descriptor);
-                            if (similarity > similarityThreshold) {
-                                group.add(descriptor);
-                                addedToGroup = true;
-                                break;
-                            }
-                        }
-                        if (!addedToGroup) {
-                            List<INDArray> newGroup = new ArrayList<>();
-                            newGroup.add(descriptor);
-                            groups.add(newGroup);
-                        }
+                        addToCNNGroup(groups, descriptor, similarityThreshold);
                         descriptorString.setLength(0); // Clear the StringBuilder for the next descriptor
                     }
                 } else {
@@ -128,22 +131,135 @@ public class CNNExtractor {
             }
         }
 
-        for (List<INDArray> group : groups) {
-            INDArray groupDescriptor = calculateAverageIndArray(group);
-            INDArray selectedDescriptor = null;
-            double maxSimilarity = -1;
-            for (INDArray descriptor : group) {
-                double similarity = compareFeatures(groupDescriptor, descriptor);
-                if (similarity > maxSimilarity) {
-                    maxSimilarity = similarity;
-                    selectedDescriptor = descriptor;
-                }
+        for (CNNGroup group : groups) {
+            group.descriptors.sort(Comparator.comparingDouble(d -> compareFeatures(group.average, d)));
+            Collections.reverse(group.descriptors);  // Para ter os mais similares primeiro
+            int elementsToSample = (int) (group.descriptors.size() * (samplingPercentage / 100.0));
+            if (elementsToSample == 0 && !group.descriptors.isEmpty()) {
+                elementsToSample = 1;
             }
-            if (selectedDescriptor != null) {
-                selectedDescriptors.add(selectedDescriptor);
+            selectedDescriptors.addAll(group.descriptors.subList(0, elementsToSample));
+            log.info(elementsToSample + " quadros adicionados à amostra do grupo.");
+        }
+
+        return selectedDescriptors;
+    }
+
+    private void addToCNNGroup(List<CNNGroup> groups, INDArray descriptor, double similarityThreshold) {
+        for (CNNGroup group : groups) {
+            if (group.isSimilar(descriptor, similarityThreshold)) {
+                group.add(descriptor);
+                log.info("Quadro adicionado ao grupo");
+                return;
             }
         }
-        return selectedDescriptors;
+        log.info("Novo grupo criado");
+        groups.add(new CNNGroup(descriptor));
+    }
+
+    private static class CNNGroup {
+        private List<INDArray> descriptors = new ArrayList<>();
+        private INDArray average;
+
+        CNNGroup(INDArray descriptor) {
+            add(descriptor);
+        }
+
+        void add(INDArray descriptor) {
+            descriptors.add(descriptor);
+            updateAverage(descriptor);
+        }
+
+        boolean isSimilar(INDArray descriptor, double similarityThreshold) {
+            if (average == null) {
+                return true;
+            }
+            double similarity = compareFeatures(average, descriptor);
+            log.info("Distancia: {}, similarityThreshold: {}", similarity, similarityThreshold);
+            return similarity < similarityThreshold;
+        }
+
+        private void updateAverage(INDArray newDescriptor) {
+            if (average == null) {
+                average = newDescriptor.dup();
+            } else {
+                average = average.add(newDescriptor).div(descriptors.size());
+            }
+        }
+    }
+
+    public List<INDArray> sampleRandomCNNDescriptors(File descriptorFile, double samplingPercentage) throws IOException {
+        List<INDArray> allDescriptors = new ArrayList<>();
+
+        // Lendo e parseando todos os descritores do arquivo
+        try (BufferedReader reader = new BufferedReader(new FileReader(descriptorFile))) {
+            String line;
+            StringBuilder descriptorString = new StringBuilder();
+            while ((line = reader.readLine()) != null) {
+                if (line.trim().isEmpty()) {
+                    if (descriptorString.length() > 0) {
+                        INDArray descriptor = stringToINDArray(descriptorString.toString());
+                        allDescriptors.add(descriptor);
+                        descriptorString.setLength(0);  // Limpa o StringBuilder para o próximo descritor
+                    }
+                } else {
+                    descriptorString.append(line).append("\n");
+                }
+            }
+        }
+
+        // Calculando a quantidade de descritores a serem amostrados
+        int totalDescriptors = allDescriptors.size();
+        int sampleSize = (int) (totalDescriptors * samplingPercentage / 100.0);
+        if (sampleSize == 0 && !allDescriptors.isEmpty()) {
+            sampleSize = 1;  // Garante que pelo menos um elemento seja selecionado
+        }
+
+        // Selecionando aleatoriamente os descritores
+        List<INDArray> sampledDescriptors = new ArrayList<>();
+        Random random = new Random();
+        for (int i = 0; i < sampleSize; i++) {
+            int randomIndex = random.nextInt(allDescriptors.size());
+            sampledDescriptors.add(allDescriptors.get(randomIndex));
+            allDescriptors.remove(randomIndex);  // Para evitar amostragem repetida
+        }
+
+        return sampledDescriptors;
+    }
+
+
+    public List<INDArray> sampleFramesBySecondCNN(File descriptorFile, double samplingPercentage) throws IOException {
+        List<INDArray> allDescriptors = new ArrayList<>();
+
+        // Lendo e parseando todos os descritores do arquivo
+        try (BufferedReader reader = new BufferedReader(new FileReader(descriptorFile))) {
+            String line;
+            StringBuilder descriptorString = new StringBuilder();
+            while ((line = reader.readLine()) != null) {
+                if (line.trim().isEmpty()) {
+                    if (descriptorString.length() > 0) {
+                        INDArray descriptor = stringToINDArray(descriptorString.toString());
+                        allDescriptors.add(descriptor);
+                        descriptorString.setLength(0);  // Limpa o StringBuilder para o próximo descritor
+                    }
+                } else {
+                    descriptorString.append(line).append("\n");
+                }
+            }
+        }
+
+        List<INDArray> sampledDescriptors = new ArrayList<>();
+        int framesPerSecond = 30; // Quantidade de quadros por segundo
+        int sampleSize = (int) (framesPerSecond * (samplingPercentage / 100.0));
+
+        for (int i = 0; i < allDescriptors.size(); i += framesPerSecond) {
+            int end = Math.min(i + sampleSize, allDescriptors.size());
+            for (int j = i; j < end; j++) {
+                sampledDescriptors.add(allDescriptors.get(j));
+            }
+        }
+
+        return sampledDescriptors;
     }
 
 

@@ -1,8 +1,4 @@
 package com.projeto.tcc.services;
-
-
-
-
 import lombok.extern.slf4j.Slf4j;
 import org.bytedeco.javacpp.FloatPointer;
 import org.bytedeco.opencv.opencv_core.Size;
@@ -13,75 +9,66 @@ import org.bytedeco.opencv.opencv_objdetect.HOGDescriptor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
-import java.io.IOException;
+import java.io.*;
 import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
 @Slf4j
 public class HOGExtractor {
-    @Value("${opencv.native.library.path}")
-    private String opencvNativeLibraryPath;
+
+    private final HOGDescriptor hog;
+
+    public HOGExtractor() {
+        // Inicialização do HOGDescriptor
+        hog = new HOGDescriptor();
+    }
 
     public float[] hogExtract(Mat frame) {
-        //Já recebe a imagem carregada (Imgcodecs.imread)
-        //Criação do objeto HOGDescriptor
-        log.info("Extração HOG");
-        HOGDescriptor hog = new HOGDescriptor();
+        // Criação do objeto FloatPointer para armazenar o descritor
         FloatPointer descriptor = new FloatPointer();
         hog.compute(frame, descriptor);
-        // Converte o descritor para vetor para facilitar a comparação e retorna
+        // Converte o descritor para vetor
         int descriptorSize = (int) (hog.getDescriptorSize());
         float[] descriptorArray = new float[descriptorSize];
         descriptor.get(descriptorArray);
-        //extracao das caracteristicas do frame
-        log.info("Fim da Extração HOG");
         return descriptorArray;
     }
 
-    public double distanciaEuclidiana(float[] vector1, float[] vector2) {
+    public List<float[]> hogExtractBatch(List<Mat> frames) {
+        List<float[]> descriptorsList = new ArrayList<>();
+        for (Mat frame : frames) {
+            descriptorsList.add(hogExtract(frame));
+        }
+        return descriptorsList;
+    }
+
+
+    public static double distanciaEuclidiana(float[] vector1, float[] vector2) {
         double distancia = 0;
         for (int i = 0; i < vector1.length; i++) {
             distancia += Math.pow(vector1[i] - vector2[i], 2);
         }
-        return Math.sqrt(distancia);
-    }
+        double distanciaEuclidiana = Math.sqrt(distancia);
 
-    public static float[] calculateAverage(List<float[]> list) {
-        // Verificar se a lista está vazia
-        if (list == null || list.isEmpty()) {
-            throw new IllegalArgumentException("A lista não pode ser vazia.");
+        // Normalização para o intervalo [0, 1] usando uma função sigmoide
+        double similaridade = 1 / (1 + Math.exp(distanciaEuclidiana));
+
+        if (similaridade > 1) {
+            int value = (int)similaridade;
+            similaridade = similaridade - value;
         }
 
-        // Inicializar o vetor de soma
-        int length = list.get(0).length;
-        float[] sum = new float[length];
-
-        // Somar todos os vetores
-        for (float[] array : list) {
-            if (array.length != length) {
-                throw new IllegalArgumentException("Todos os vetores devem ter o mesmo tamanho.");
-            }
-            for (int i = 0; i < length; i++) {
-                sum[i] += array[i];
-            }
+        if (similaridade < 0.1){
+            similaridade = similaridade * 10;
         }
 
-        // Calcular a média
-        float[] average = new float[length];
-        for (int i = 0; i < length; i++) {
-            average[i] = sum[i] / list.size();
-        }
-
-        return average;
+        return similaridade;
     }
 
 
-    public List<float[]> groupFramesHog(File descriptorFile, double similarityThreshold) throws IOException {
-        List<List<float[]>> groups = new ArrayList<>();
+    public List<float[]> groupFramesHog(File descriptorFile, double similarityThreshold, double samplingPercentage) throws IOException {
+        List<Group> groups = new ArrayList<>();
         List<float[]> selectedDescriptors = new ArrayList<>();
 
         try (BufferedReader reader = new BufferedReader(new FileReader(descriptorFile))) {
@@ -92,68 +79,33 @@ public class HOGExtractor {
                     if (!descriptorLines.isEmpty()) {
                         float[] descriptor = parseDescriptor(descriptorLines);
                         descriptorLines.clear();
-                        boolean addedToGroup = false;
-                        for (List<float[]> group : groups) {
-                            float[] groupDescriptor = calculateAverage(group);
-                            double distance = distanciaEuclidiana(groupDescriptor, descriptor);
-                            if (distance < similarityThreshold) {
-                                group.add(descriptor);
-                                addedToGroup = true;
-                                break;
-                            }
-                        }
-                        if (!addedToGroup) {
-                            List<float[]> newGroup = new ArrayList<>();
-                            newGroup.add(descriptor);
-                            groups.add(newGroup);
-                        }
+                        addToGroup(groups, descriptor, similarityThreshold);
                     }
                 } else {
                     descriptorLines.add(line);
                 }
             }
-            // Process the last descriptor
             if (!descriptorLines.isEmpty()) {
                 float[] descriptor = parseDescriptor(descriptorLines);
-                boolean addedToGroup = false;
-                for (List<float[]> group : groups) {
-                    float[] groupDescriptor = calculateAverage(group);
-                    double distance = distanciaEuclidiana(groupDescriptor, descriptor);
-                    if (distance < similarityThreshold) {
-                        group.add(descriptor);
-                        addedToGroup = true;
-                        break;
-                    }
-                }
-                if (!addedToGroup) {
-                    List<float[]> newGroup = new ArrayList<>();
-                    newGroup.add(descriptor);
-                    groups.add(newGroup);
-                }
+                addToGroup(groups, descriptor, similarityThreshold);
             }
         }
 
-        // Create samples from groups
-        for (List<float[]> group : groups) {
-            float[] groupDescriptor = calculateAverage(group);
-            float[] selectedDescriptor = null;
-            double maxDistance = -1;
-            for (float[] descriptor : group) {
-                double distance = distanciaEuclidiana(groupDescriptor, descriptor);
-                if (distance > maxDistance) {
-                    maxDistance = distance;
-                    selectedDescriptor = descriptor;
-                }
+        // Process groups and select a percentage of descriptors from each group
+        for (Group group : groups) {
+            group.descriptors.sort((d1, d2) -> Double.compare(distanciaEuclidiana(group.average, d2), distanciaEuclidiana(group.average, d1)));
+            int elementsToSample = (int) (group.descriptors.size() * (samplingPercentage / 100.0));
+            if (elementsToSample == 0 && !group.descriptors.isEmpty()) {
+                elementsToSample = 1; // Garante que pelo menos um elemento seja selecionado
             }
-            if (selectedDescriptor != null) {
-                selectedDescriptors.add(selectedDescriptor);
-            }
+            selectedDescriptors.addAll(group.descriptors.subList(0, elementsToSample));
+            log.info(elementsToSample + " quadros adicionados à amostra do grupo.");
         }
 
         return selectedDescriptors;
     }
 
-    private float[] parseDescriptor(List<String> descriptorLines) {
+    public float[] parseDescriptor(List<String> descriptorLines) {
         // Remove os colchetes de todas as linhas
         descriptorLines = descriptorLines.stream()
                 .map(line -> line.replaceAll("\\[|\\]", ""))
@@ -169,6 +121,126 @@ public class HOGExtractor {
         return descriptor;
     }
 
+    private void addToGroup(List<Group> groups, float[] descriptor, double similarityThreshold) {
+        for (Group group : groups) {
+            if (group.isSimilar(descriptor, similarityThreshold)) {
+                group.add(descriptor);
+                return;
+            }
+        }
+        groups.add(new Group(descriptor));
+    }
+
+    private static class Group {
+        private List<float[]> descriptors = new ArrayList<>();
+        private float[] average;
+
+        Group(float[] descriptor) {
+            add(descriptor);
+        }
+
+        void add(float[] descriptor) {
+            descriptors.add(descriptor);
+            updateAverage(descriptor);
+        }
+
+        boolean isSimilar(float[] descriptor, double similarityThreshold) {
+            if (average == null) {
+                return true;
+            }
+            double distance = distanciaEuclidiana(average, descriptor);
+            log.info("Distancia: {}, similarityThreshold: {}", distance, similarityThreshold);
+            return distance < similarityThreshold;
+        }
+
+        private void updateAverage(float[] newDescriptor) {
+            if (average == null) {
+                average = newDescriptor.clone();
+            } else {
+                for (int i = 0; i < average.length; i++) {
+                    average[i] = (average[i] * (descriptors.size() - 1) + newDescriptor[i]) / descriptors.size();
+                }
+            }
+        }
+
+    }
+
+    public List<float[]> sampleRandomDescriptors(File descriptorFile, double samplingPercentage) throws IOException {
+        List<float[]> allDescriptors = new ArrayList<>();
+
+        // Lendo e parseando todos os descritores do arquivo
+        try (BufferedReader reader = new BufferedReader(new FileReader(descriptorFile))) {
+            List<String> descriptorLines = new ArrayList<>();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isEmpty()) {
+                    if (!descriptorLines.isEmpty()) {
+                        float[] descriptor = parseDescriptor(descriptorLines);
+                        allDescriptors.add(descriptor);
+                        descriptorLines.clear();
+                    }
+                } else {
+                    descriptorLines.add(line);
+                }
+            }
+            if (!descriptorLines.isEmpty()) {
+                float[] descriptor = parseDescriptor(descriptorLines);
+                allDescriptors.add(descriptor);
+            }
+        }
+
+        // Calculando a quantidade de descritores a serem amostrados
+        int totalDescriptors = allDescriptors.size();
+        int sampleSize = (int) (totalDescriptors * samplingPercentage / 100.0);
+        if (sampleSize == 0 && !allDescriptors.isEmpty()) {
+            sampleSize = 1;  // Garante que pelo menos um elemento seja selecionado
+        }
+
+        // Embaralhando os descritores e selecionando a amostra
+        Collections.shuffle(allDescriptors, new Random());
+        List<float[]> sampledDescriptors = new ArrayList<>(allDescriptors.subList(0, Math.min(sampleSize, allDescriptors.size())));
+
+        return sampledDescriptors;
+    }
+
+
+    public List<float[]> sampleFramesBySecondHOG(File descriptorFile, double samplingPercentage) throws IOException {
+        List<float[]> allDescriptors = new ArrayList<>();
+
+        // Lendo todos os descritores do arquivo
+        try (BufferedReader reader = new BufferedReader(new FileReader(descriptorFile))) {
+            List<String> descriptorLines = new ArrayList<>();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isEmpty()) {
+                    if (!descriptorLines.isEmpty()) {
+                        float[] descriptor = parseDescriptor(descriptorLines);
+                        allDescriptors.add(descriptor);
+                        descriptorLines.clear();
+                    }
+                } else {
+                    descriptorLines.add(line);
+                }
+            }
+            if (!descriptorLines.isEmpty()) {
+                float[] descriptor = parseDescriptor(descriptorLines);
+                allDescriptors.add(descriptor);
+            }
+        }
+
+        List<float[]> sampledDescriptors = new ArrayList<>();
+        int framesPerSecond = 30; // Quantidade de quadros por segundo
+        int sampleSize = (int) (framesPerSecond * (samplingPercentage / 100.0));
+
+        for (int i = 0; i < allDescriptors.size(); i += framesPerSecond) {
+            int end = Math.min(i + sampleSize, allDescriptors.size());
+            for (int j = i; j < end; j++) {
+                sampledDescriptors.add(allDescriptors.get(j));
+            }
+        }
+
+        return sampledDescriptors;
+    }
 
 
 }

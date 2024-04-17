@@ -3,6 +3,7 @@ package com.projeto.tcc.services;
 
 
 import lombok.extern.slf4j.Slf4j;
+import org.antlr.v4.runtime.atn.SemanticContext;
 import org.bytedeco.opencv.global.opencv_core;
 import org.bytedeco.opencv.opencv_core.*;
 import org.bytedeco.opencv.opencv_core.Mat;
@@ -11,51 +12,63 @@ import org.bytedeco.opencv.opencv_features2d.ORB;
 import org.bytedeco.opencv.opencv_features2d.DescriptorMatcher;
 import org.bytedeco.opencv.opencv_core.DMatch;
 import org.springframework.stereotype.Service;
-import static org.bytedeco.opencv.global.opencv_imgproc.resize;
+import static org.bytedeco.opencv.global.opencv_imgproc.*;
 import static org.bytedeco.opencv.global.opencv_core.*;
 import org.bytedeco.javacpp.indexer.FloatIndexer;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
-import java.io.IOException;
+import java.io.*;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.Arrays;
 
 @Service
 @Slf4j
 public class ORBExtractor {
 
+
+    private final ORB orb;
+
+    public ORBExtractor() {
+        // Inicializa o ORB com 1000 keypoints
+        orb = ORB.create();
+        orb.setMaxFeatures(1000);
+    }
+
     public Mat orbFeaturesExtractor(Mat image) {
-        // Recebe a imagem já carregada (Imgcodecs.imread)
-        // Extrai características ORB das imagem
-        log.info("Extração ORB");
-        ORB orb = ORB.create();
         KeyPointVector keypoints = new KeyPointVector();
-        // Criação do Mat que sera retornado e pode ser comparado posteriormente
         Mat descriptors = new Mat();
         orb.detectAndCompute(image, new Mat(), keypoints, descriptors);
-        // Verifica se o tipo dos descritores é CV_8U
         if (descriptors.type() != opencv_core.CV_8U) {
             throw new IllegalArgumentException("Os descritores não são do tipo CV_8U.");
         }
         return descriptors;
     }
+    public List<Mat> orbFeaturesExtractorBatch(List<Mat> frames) {
+        List<Mat> descriptorsList = new ArrayList<>();
+        for (Mat frame : frames) {
+            descriptorsList.add(orbFeaturesExtractor(frame));
+        }
+        return descriptorsList;
+    }
 
-    public DMatchVector compareFeatures(Mat descriptors1, Mat descriptors2) {
-        //uso da distância de Hamming para descriptores binários
+    /*
+    public static double compareFeatures(Mat descriptors1, Mat descriptors2) {
         DescriptorMatcher matcher = DescriptorMatcher.create(DescriptorMatcher.BRUTEFORCE_HAMMING);
         DMatchVector matches = new DMatchVector();
         matcher.match(descriptors1, descriptors2, matches);
 
         // Filtragem de correspondências
         DMatchVector goodMatches = filterMatches(matches);
-        // Uso de goodMatches.getTotal() para ter o numero de correspondencias entre as imagens
-        return goodMatches;
+
+        // Normaliza a medida de similaridade para o intervalo [0.1, 1]
+        double similarity = goodMatches.size() / (double) matches.size();
+
+        return 0.9 * similarity + 0.1;
     }
+     */
 
     // Função para filtrar correspondências com base na distância Hamming definica como multiplo da distancia minima entre as correspondencias
-    public DMatchVector  filterMatches(DMatchVector  matches) {
+    public static DMatchVector  filterMatches(DMatchVector  matches) {
         //valores maximo e mínimo
         double maxDist = Double.MIN_VALUE;
         double minDist = Double.MAX_VALUE;
@@ -81,16 +94,30 @@ public class ORBExtractor {
         return goodMatches;
     }
 
-    public KeyPointVector orbDetect(Mat frame) {
-        // Cria o detector ORB
-        ORB orb = ORB.create();
-        // Cria um objeto para armazenar os pontos-chave detectados
-        KeyPointVector keypoints = new KeyPointVector();
-        // Detecta os pontos-chave
-        orb.detect(frame, keypoints);
+    public static double compareFeatures(Mat descriptors1, Mat descriptors2) {
+        DescriptorMatcher matcher = DescriptorMatcher.create(DescriptorMatcher.BRUTEFORCE_HAMMING);
+        DMatchVector matches = new DMatchVector();
+        int maxMatches = 50;
+        matcher.match(descriptors1, descriptors2, matches);
 
-        return keypoints;
+        // Calcular a média das distâncias de Hamming dos melhores matches
+        double distanciaHammingMedia = 0;
+        int count = (int) Math.min(maxMatches, matches.size());
+        for (int i = 0; i < count; i++) {
+            distanciaHammingMedia += matches.get(i).distance();
+        }
+        distanciaHammingMedia /= count;
+
+        // Normalizar a distância média para o intervalo [0, 1]
+        double maxDistancia = descriptors1.cols() * 8; // Número máximo de bits diferentes
+        double distanciaNormalizada = distanciaHammingMedia / maxDistancia;
+
+        // Converter a distância normalizada em uma medida de similaridade
+        double similaridade = 1 - distanciaNormalizada;
+
+        return similaridade;
     }
+
 
     public static Mat stringToMat(String str) {
         String[] parts = str.split("\n", 2);
@@ -115,55 +142,39 @@ public class ORBExtractor {
             throw new IllegalArgumentException("A lista não pode ser vazia.");
         }
 
-        // Determinar o tamanho e tipo mais comuns
-        Map<Size, Integer> sizeCountMap = new HashMap<>();
-        Map<Integer, Integer> typeCountMap = new HashMap<>();
-        for (Mat mat : mats) {
-            Size size = mat.size();
-            sizeCountMap.merge(size, 1, Integer::sum);
-            typeCountMap.merge(mat.type(), 1, Integer::sum);
-        }
-        Size commonSize = Collections.max(sizeCountMap.entrySet(), Map.Entry.comparingByValue()).getKey();
-        int commonType = Collections.max(typeCountMap.entrySet(), Map.Entry.comparingByValue()).getKey();
-
-        // Ajustar Mats incompatíveis
-        List<Mat> adjustedMats = new ArrayList<>();
-        for (Mat mat : mats) {
-            if (!mat.size().equals(commonSize) || mat.type() != commonType) {
-                Mat adjustedMat = new Mat();
-                resize(mat, adjustedMat, new Size((int) commonSize.width(), (int) commonSize.height()));
-                adjustedMats.add(adjustedMat);
-            } else {
-                adjustedMats.add(mat.clone());
-            }
-        }
+        // Determinar o tamanho comum
+        Size commonSize = mats.get(0).size();
 
         // Calcular a média
-        Mat sum = new Mat(commonSize, CV_32F);
-        for (Mat mat : adjustedMats) {
-            Mat floatMat = new Mat();
-            mat.convertTo(floatMat, CV_32F); // Convertendo para float
-            add(sum, floatMat, sum);
+        Mat sum = new Mat(commonSize, CV_32F, new Scalar(0)); // Inicializa a matriz de soma com zeros
+        Mat resizedMat = new Mat();
+        Mat floatMat = new Mat();
+        for (Mat mat : mats) {
+            resize(mat, resizedMat, commonSize); // Redimensiona o Mat para o tamanho comum
+            resizedMat.convertTo(floatMat, CV_32F); // Conversão para float
+            add(sum, floatMat, sum); // Adição in-place
         }
 
-        // Dividir cada elemento do sum pelo número de Mats
-        FloatIndexer sumIndexer = sum.createIndexer();
-        for (int y = 0; y < sum.rows(); y++) {
-            for (int x = 0; x < sum.cols(); x++) {
-                sumIndexer.put(y, x, sumIndexer.get(y, x) / adjustedMats.size());
-            }
-        }
-        sumIndexer.release();
+        // Criar um Mat representando o escalar (número de mats)
+        Mat divisor = new Mat(commonSize, CV_32F, new Scalar(mats.size()));
+        divide(sum, divisor, sum); // Divisão in-place
 
+        // Convertendo de volta para o tipo comum
         Mat average = new Mat();
-        sum.convertTo(average, commonType); // Convertendo de volta para o tipo comum
+        sum.convertTo(average, mats.get(0).type());
+
+        // Liberação de recursos
+        sum.release();
+        resizedMat.release();
+        floatMat.release();
+        divisor.release();
 
         return average;
     }
 
 
-    public List<Mat> groupFramesORB(File descriptorFile, double similarityThreshold) throws IOException {
-        List<List<Mat>> groups = new ArrayList<>();
+    public List<Mat> groupFramesORB(File descriptorFile, double similarityThreshold, double samplingPercentage) throws IOException {
+        List<ORBGroup> groups = new ArrayList<>();
         List<Mat> selectedDescriptors = new ArrayList<>();
 
         try (BufferedReader reader = new BufferedReader(new FileReader(descriptorFile))) {
@@ -174,21 +185,7 @@ public class ORBExtractor {
                     if (!descriptorLines.isEmpty()) {
                         Mat descriptor = stringToMat(String.join("\n", descriptorLines));
                         descriptorLines.clear();
-                        boolean addedToGroup = false;
-                        for (List<Mat> group : groups) {
-                            Mat groupDescriptor = calculateAverageMat(group);
-                            DMatchVector matches = compareFeatures(groupDescriptor, descriptor);
-                            if (matches.size() < similarityThreshold) {
-                                group.add(descriptor);
-                                addedToGroup = true;
-                                break;
-                            }
-                        }
-                        if (!addedToGroup) {
-                            List<Mat> newGroup = new ArrayList<>();
-                            newGroup.add(descriptor);
-                            groups.add(newGroup);
-                        }
+                        addToORBGroup(groups, descriptor, similarityThreshold);
                     }
                 } else {
                     descriptorLines.add(line);
@@ -197,45 +194,77 @@ public class ORBExtractor {
             // Process the last descriptor
             if (!descriptorLines.isEmpty()) {
                 Mat descriptor = stringToMat(String.join("\n", descriptorLines));
-                boolean addedToGroup = false;
-                for (List<Mat> group : groups) {
-                    Mat groupDescriptor = calculateAverageMat(group);
-                    DMatchVector matches = compareFeatures(groupDescriptor, descriptor);
-                    if (matches.size() < similarityThreshold) {
-                        group.add(descriptor);
-                        addedToGroup = true;
-                        break;
-                    }
-                }
-                if (!addedToGroup) {
-                    List<Mat> newGroup = new ArrayList<>();
-                    newGroup.add(descriptor);
-                    groups.add(newGroup);
-                }
+                addToORBGroup(groups, descriptor, similarityThreshold);
             }
         }
 
         // Create samples from groups
-        for (List<Mat> group : groups) {
-            Mat groupDescriptor = calculateAverageMat(group);
-            Mat selectedDescriptor = null;
-            double maxMatches = -1;
-            for (Mat descriptor : group) {
-                DMatchVector matches = compareFeatures(groupDescriptor, descriptor);
-                if (matches.size() > maxMatches) {
-                    maxMatches = matches.size();
-                    selectedDescriptor = descriptor;
-                }
-            }
+        for (ORBGroup group : groups) {
+            Mat selectedDescriptor = group.selectRepresentative();
             if (selectedDescriptor != null) {
                 selectedDescriptors.add(selectedDescriptor);
             }
+            log.info("Quadro adicionado a amostra!!");
         }
 
-        return selectedDescriptors;
+        // Sample the selected descriptors
+        int elementsToSample = (int) (selectedDescriptors.size() * (samplingPercentage / 100.0));
+        if (elementsToSample == 0 && !selectedDescriptors.isEmpty()) {
+            elementsToSample = 1; // Garante que pelo menos um elemento seja selecionado
+        }
+        return selectedDescriptors.subList(0, elementsToSample);
     }
 
+    private void addToORBGroup(List<ORBGroup> groups, Mat descriptor, double similarityThreshold) {
+        for (ORBGroup group : groups) {
+            if (group.isSimilar(descriptor, similarityThreshold)) {
+                group.add(descriptor);
+                log.info("Quadro adicionado ao grupo");
+                return;
+            }
+        }
+        log.info("Novo grupo criado");
+        groups.add(new ORBGroup(descriptor));
+    }
 
+    private static class ORBGroup {
+        private List<Mat> descriptors = new ArrayList<>();
+        private Mat average;
 
+        ORBGroup(Mat descriptor) {
+            add(descriptor);
+        }
+
+        void add(Mat descriptor) {
+            descriptors.add(descriptor);
+            updateAverage();
+        }
+
+        boolean isSimilar(Mat descriptor, double similarityThreshold) {
+            if (average == null) {
+                return true;
+            }
+            double similarity = compareFeatures(average, descriptor);
+            log.info("Distancia: {}, similarityThreshold: {}", similarity, similarityThreshold);
+            return similarity < similarityThreshold;
+        }
+
+        Mat selectRepresentative() {
+            Mat selectedDescriptor = null;
+            double maxSimilarity = -1;
+            for (Mat descriptor : descriptors) {
+                double similarity = compareFeatures(average, descriptor);
+                if (similarity > maxSimilarity) {
+                    maxSimilarity = similarity;
+                    selectedDescriptor = descriptor;
+                }
+            }
+            return selectedDescriptor;
+        }
+
+        private void updateAverage() {
+            average = calculateAverageMat(descriptors);
+        }
+    }
 
 }
